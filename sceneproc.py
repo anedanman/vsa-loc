@@ -61,11 +61,25 @@ def scene_repr(sem_img, mapp, ind2title, skip_wall=True, no_coords=True):
     return result
 
 
+def proc_pair(groups, types, pair_names, type):
+    for i, group in enumerate(groups):
+        if pair_names[0] in group or pair_names[1] in group:
+            groups[i].add(pair_names[0])
+            groups[i].add(pair_names[1])
+            return None
+    new_group = {pair_names[0], pair_names[1]}
+    groups.append(new_group)
+    types.append(type)
+
+            
+
 def get_pairs(sem_img, scene_objs):
     names2scene_objs = {obj['name']: obj for obj in scene_objs}
     pairs = []
     used_names = set()
     seen_names = set()
+    groups_with_cmmn_edg = []
+    groups_types = []
     for el1 in scene_objs:
         mask1 = sem_img == el1['name']
         seen_names.add(el1['name'])
@@ -80,6 +94,7 @@ def get_pairs(sem_img, scene_objs):
                 used_names.add(el1['name'])
                 used_names.add(el2['name'])
             elif el2['name'] not in seen_names and el1['type'] == el2['type']:
+                proc_pair(groups_with_cmmn_edg, groups_types, (el1['name'], el2['name']), el1['type'])
                 used_names.add(el1['name'])
                 used_names.add(el2['name'])
                 
@@ -87,6 +102,8 @@ def get_pairs(sem_img, scene_objs):
     for el in scene_objs:
         if el['name'] not in used_names:
             other_elements.append(el)
+    for type in groups_types:
+        other_elements.append({'type': type})
     return pairs, other_elements
 
 

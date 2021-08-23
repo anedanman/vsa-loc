@@ -44,7 +44,6 @@ def is_database(name):
 
 
 def proccess_descr(path_to_global_descriptors, query_image, database, sem_path, num_keypoints = 4096, k=0.5, mode=''):
-    im = None
     dbFeat = []
     sims = []
     
@@ -170,12 +169,12 @@ def gl_save_vectrs(descrs_path='./vectors/HF-Net_descriptors',
 def gl_save_edge_vectrs(descrs_path='./vectors/HF-Net_descriptors',
                         sem_path='./vectors/semantic_edges',
                         path_to_hdf5_datasets='./datasets/Habitat/HPointLoc/',
-                        use_R=True, skip_wall=True):
+                        use_R=True, skip_wall=False):
     for map_name in os.listdir(descrs_path):
         save_edge_vectrs(os.path.join(descrs_path, map_name), 
                     os.path.join(sem_path, map_name),
                     os.path.join(path_to_hdf5_datasets, map_name),
-                    use_R=True, skip_wall=True)
+                    use_R=use_R, skip_wall=skip_wall)
 
 
 def main_test(path_to_hdf='./datasets/Habitat/HPointLoc/',
