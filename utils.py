@@ -6,9 +6,9 @@ from scipy.spatial.transform import Rotation as R
 from tqdm import tqdm
 import vsa
 from sklearn.metrics.pairwise import cosine_similarity
-import faiss
 import ast 
 from sceneproc import create_im, sem2vec, sem2edgevec
+import json
 
 
 def quaternion_to_rotation_matrix(quaternion_wxyz):
@@ -71,49 +71,58 @@ def proccess_descr(path_to_global_descriptors, query_image, database, sem_path, 
     return simil_score, db_image
 
 
-#{q: query name, top5hfnet: [{'filename':, 'hfnetsim':, 'semsim':, 'dist':}, ], top5dist: [...], top5sem:}
-def proccess_descr_adv(path_to_hdf_files, path_to_global_descriptors, query_image, database, sem_path, k=0.5, mode='', n=5):
-    sims = []
-    result = []
+def proccess_descr_adv(path_to_hdf_files, path_to_global_descriptors,
+                       query_image, database, sem_path, k=0.5, n=5, hfnthr=0.1, semthr=0.1):
     with open(os.path.join(path_to_global_descriptors, query_image+'.npy'), 'rb') as f:
             descriptor_query = np.load(f)
     with open(os.path.join(sem_path, query_image+'.npy'), 'rb') as f:
-            query_vec = np.load(f)        
-    
-    for db_image in database:
+            query_vec = np.load(f)
+    hfnet_feat = np.zeros((len(database), descriptor_query.shape[0])) 
+    sem_feat = np.zeros((len(database), query_vec.shape[0]))   
+    dists = []
+    db_names = []
+    for i, db_image in enumerate(database):
         with open(os.path.join(path_to_global_descriptors, db_image+'.npy'), 'rb') as f:
             descriptor2 = np.load(f) 
         with open(os.path.join(sem_path, db_image+'.npy'), 'rb') as f:
             db_vec = np.load(f)
-
-        sim1 = cosine_similarity(descriptor_query.reshape(1, -1), descriptor2.reshape(1, -1))[0][0]
-        sim2 = vsa.sim(query_vec, db_vec)
-        sim = k * sim1 + (1-k) * sim2
+        hfnet_feat[i, :] = descriptor2
+        sem_feat[i, :] = db_vec
         dist = get_dist(query_image, db_image, path_to_hdf_files)
-        result.append({'db_filename': db_image,
-                       'hfnetsim': sim1,
-                       'semsim': sim2,
-                       'dist': dist})
-        if mode == 'semantic':
-            sim = sim2
-        if mode == 'default':
-            sim = sim1
-        sims.append(sim)
+        db_names.append(db_image)
+        dists.append(dist)
+
+    hfnetsims = (hfnet_feat @ descriptor_query.reshape(-1, 1)).reshape(-1)
+    semsims = (sem_feat @ query_vec.reshape(-1, 1)).reshape(-1)
+    result = [
+        {'db_filename': db_image,
+        'hfnetsim': sim1,
+        'semsim': sim2,
+        'dist': dist} for db_image, sim1, sim2, dist in zip(db_names, hfnetsims, semsims, dists)]
+
+    with open(os.path.join(path_to_global_descriptors, query_image+'.json'), 'w') as f:
+        json.dump(result, f)
+
     tophfnet = sorted(result, key=lambda x: -x['hfnetsim'])
+    topsem = []
     topdist = sorted(result, key=lambda x: x['dist'])
-    topsem = sorted(result, key=lambda x: -x['semsim'])   
-        
-    num_new = np.argmax(sims)
-    db_image = database[num_new]
-    simil_score = sims[num_new]
-    return simil_score, db_image, tophfnet[:n], topdist[:n], topsem[:n]
+    #topsem = sorted(result, key=lambda x: -x['semsim'])   
+
+    res_ans = tophfnet[0]
+    for pos_ans in tophfnet[1:n]:
+        if res_ans['hfnetsim'] - pos_ans['hfnetsim'] < hfnthr and pos_ans['semsim'] - res_ans['semsim'] > semthr:
+            res_ans = pos_ans
+    db_image = res_ans['db_filename']
+    delta = res_ans['dist'] - topdist[0]['dist']
+    return delta, db_image, tophfnet[:n], topdist[:n], topsem[:n]
 
 
 def adv_test(path_to_hdf='./datasets/Habitat/HPointLoc/',
               path_to_hfnet='./vectors/HF-Net_descriptors',
               path_to_sem='./vectors/semantic_edges',
-              mode='default', k=0.9, dist_thr=20):
+              k=0.9, dist_thr=20, hfnthr=0.1, semthr=0.1, n=5, use_saved=True):
     results = []
+    deltas = []
     problem_cases = []
     for map_name in os.listdir(path_to_hfnet):
         #creating database
@@ -128,12 +137,28 @@ def adv_test(path_to_hdf='./datasets/Habitat/HPointLoc/',
         distances = [0.25, 0.5, 1, 5, 10, 20]
         res = {i:0 for i in distances}
         for query in tqdm(queries):
-            simil_score, db_image, tophfnet, topdist, topsem = proccess_descr_adv(os.path.join(path_to_hdf, map_name),
-                                                                              os.path.join(path_to_hfnet, map_name),
-                                                                              query, database,
-                                                                              os.path.join(path_to_sem, map_name),
-                                                                              mode=mode, k=k)
-            dist_diff = get_dist(query, db_image, os.path.join(path_to_hdf, map_name))
+            if not use_saved:
+                delta, db_image, tophfnet, topdist, topsem = proccess_descr_adv(os.path.join(path_to_hdf, map_name),
+                                                                                os.path.join(path_to_hfnet, map_name),
+                                                                                query, database,
+                                                                                os.path.join(path_to_sem, map_name),
+                                                                                k=k, n=n, semthr=semthr, hfnthr=hfnthr)
+                dist_diff = get_dist(query, db_image, os.path.join(path_to_hdf, map_name))
+                deltas.append(delta)
+            else:
+                with open(os.path.join(os.path.join(path_to_hfnet, map_name), query + '.json'), 'r') as f:
+                    result = json.load(f)
+                tophfnet = sorted(result, key=lambda x: -x['hfnetsim'])
+                topdist = sorted(result, key=lambda x: x['dist'])
+                res_ans = tophfnet[0]
+                for pos_ans in tophfnet[1:n]:
+                    if res_ans['hfnetsim'] - pos_ans['hfnetsim'] < hfnthr and pos_ans['semsim'] - res_ans['semsim'] > semthr:
+                        res_ans = pos_ans
+                db_image = res_ans['db_filename']
+                delta = res_ans['dist'] - topdist[0]['dist']
+                dist_diff = get_dist(query, db_image, os.path.join(path_to_hdf, map_name))
+                deltas.append(delta)
+
             for d in distances:
                 if dist_diff < d:
                     res[d] += 1
@@ -150,8 +175,7 @@ def adv_test(path_to_hdf='./datasets/Habitat/HPointLoc/',
             answer[i] += res[i]
     for i in answer:
         answer[i] = answer[i] / len(results)
-    return answer, problem_cases
-    
+    return answer, problem_cases, np.mean(deltas)
     
     
 def get_pose(filename, path_to_hdf5_datasets):
