@@ -7,8 +7,9 @@ from tqdm import tqdm
 import vsa
 from sklearn.metrics.pairwise import cosine_similarity
 import ast 
-from sceneproc import create_im, sem2vec, sem2edgevec
+from sceneproc import create_im, sem2vec, sem2edgevec, sem2depthvec
 import json
+import matplotlib.pyplot as plt
 
 
 def quaternion_to_rotation_matrix(quaternion_wxyz):
@@ -100,13 +101,15 @@ def proccess_descr_adv(path_to_hdf_files, path_to_global_descriptors,
         'semsim': sim2,
         'dist': dist} for db_image, sim1, sim2, dist in zip(db_names, hfnetsims, semsims, dists)]
 
-    with open(os.path.join(path_to_global_descriptors, query_image+'.json'), 'w') as f:
+    if not os.path.exists(os.path.join(path_to_global_descriptors, 'res')):
+        os.mkdir(os.path.join(path_to_global_descriptors, 'res'))
+    with open(os.path.join(path_to_global_descriptors, 'res', query_image+'.json'), 'w') as f:
         json.dump(result, f)
 
     tophfnet = sorted(result, key=lambda x: -x['hfnetsim'])
     topsem = []
     topdist = sorted(result, key=lambda x: x['dist'])
-    #topsem = sorted(result, key=lambda x: -x['semsim'])   
+    topsem = sorted(result, key=lambda x: -x['semsim'])   
 
     res_ans = tophfnet[0]
     for pos_ans in tophfnet[1:n]:
@@ -129,6 +132,8 @@ def adv_test(path_to_hdf='./datasets/Habitat/HPointLoc/',
         queries = []
         database = []
         for name in os.listdir(os.path.join(path_to_hfnet, map_name)):
+            if 'res' in name:
+                continue
             if is_database(name):
                 database.append(name.rstrip('.npy'))
             else:
@@ -136,7 +141,7 @@ def adv_test(path_to_hdf='./datasets/Habitat/HPointLoc/',
                 
         distances = [0.25, 0.5, 1, 5, 10, 20]
         res = {i:0 for i in distances}
-        for query in tqdm(queries):
+        for query in queries:
             if not use_saved:
                 delta, db_image, tophfnet, topdist, topsem = proccess_descr_adv(os.path.join(path_to_hdf, map_name),
                                                                                 os.path.join(path_to_hfnet, map_name),
@@ -146,13 +151,16 @@ def adv_test(path_to_hdf='./datasets/Habitat/HPointLoc/',
                 dist_diff = get_dist(query, db_image, os.path.join(path_to_hdf, map_name))
                 deltas.append(delta)
             else:
-                with open(os.path.join(os.path.join(path_to_hfnet, map_name), query + '.json'), 'r') as f:
+                with open(os.path.join(os.path.join(path_to_hfnet, map_name), 'res', query + '.json'), 'r') as f:
                     result = json.load(f)
                 tophfnet = sorted(result, key=lambda x: -x['hfnetsim'])
                 topdist = sorted(result, key=lambda x: x['dist'])
+                topsem = sorted(result, key=lambda x: -x['semsim'])   
                 res_ans = tophfnet[0]
                 for pos_ans in tophfnet[1:n]:
-                    if res_ans['hfnetsim'] - pos_ans['hfnetsim'] < hfnthr and pos_ans['semsim'] - res_ans['semsim'] > semthr:
+                    st1 = (res_ans['hfnetsim'] - pos_ans['hfnetsim']) * 17 < (pos_ans['semsim'] - res_ans['semsim'])
+                    st2 = pos_ans['hfnetsim'] >= 0.8 and (res_ans['hfnetsim'] - pos_ans['hfnetsim']) * 9 < (pos_ans['semsim'] - res_ans['semsim'])
+                    if (res_ans['hfnetsim'] - pos_ans['hfnetsim'] <= hfnthr and pos_ans['semsim'] - res_ans['semsim'] >= semthr) or st1 or st2:
                         res_ans = pos_ans
                 db_image = res_ans['db_filename']
                 delta = res_ans['dist'] - topdist[0]['dist']
@@ -164,7 +172,7 @@ def adv_test(path_to_hdf='./datasets/Habitat/HPointLoc/',
                     res[d] += 1
             if dist_diff > dist_thr:
                 problem_cases.append({'query_name': query, 'top_hfnet': tophfnet,
-                                    'top_dist': topdist, 'top_sem': topsem})
+                                    'top_dist': topdist, 'top_sem': topsem, 'resans': res_ans})
         for i in res:
             res[i] = res[i] / len(queries)
         results.append(res)
@@ -191,11 +199,12 @@ def get_pose(filename, path_to_hdf5_datasets):
     pose_44_query1[:3,:3] = orientation
     pose_44_query1[:3,3] = translation
     semantic = hdf5_file_query1['semantic'+is_db][num_query1]
+    depth = hdf5_file_query1['depth'+is_db][num_query1]
     
     index_to_title_map_query = ast.literal_eval(str(np.array(hdf5_file_query1['index_to_title_map'])))
     mapping_query = np.array(hdf5_file_query1['mapping'])
         
-    return pose_44_query1, semantic, index_to_title_map_query, mapping_query
+    return depth, semantic, index_to_title_map_query, mapping_query
 
 
 def poses_diff(pose1, pose2):
@@ -230,6 +239,20 @@ def save_edge_vectrs(descrs_path, sem_path, path_to_hdf5_datasets, use_R=True, s
         db_vec = sem2edgevec(db_sem, mapping, index_to_title_map, im, use_R, skip_wall)
         with open(os.path.join(sem_path, name), 'wb') as f:
             np.save(f, db_vec)
+
+
+def save_depth_vectrs(descrs_path, sem_path, path_to_hdf5_datasets):
+    im = None
+    for name in tqdm(os.listdir(descrs_path)):
+        depth_im, db_sem, index_to_title_map, mapping = get_pose(name, path_to_hdf5_datasets)
+        if im is None:
+            im = create_im(index_to_title_map.values())
+            
+        db_vec = sem2depthvec(db_sem, depth_im, mapping, index_to_title_map, im)
+        if not os.path.exists(sem_path):
+            os.mkdir(sem_path)
+        with open(os.path.join(sem_path, name), 'wb') as f:
+            np.save(f, db_vec)
             
             
 def gl_save_vectrs(descrs_path='./vectors/HF-Net_descriptors',
@@ -250,6 +273,17 @@ def gl_save_edge_vectrs(descrs_path='./vectors/HF-Net_descriptors',
                     os.path.join(sem_path, map_name),
                     os.path.join(path_to_hdf5_datasets, map_name),
                     use_R=use_R, skip_wall=skip_wall)
+
+
+def gl_save_depth_vectrs(descrs_path='./vectors/HF-Net_descriptors',
+                        sem_path='./vectors/semantic_depths',
+                        path_to_hdf5_datasets='./datasets/Habitat/HPointLoc/'):
+    if not os.path.exists(sem_path):
+        os.mkdir(sem_path)
+    for map_name in os.listdir(descrs_path):
+        save_depth_vectrs(os.path.join(descrs_path, map_name), 
+                    os.path.join(sem_path, map_name),
+                    os.path.join(path_to_hdf5_datasets, map_name))
 
 
 def main_test(path_to_hdf='./datasets/Habitat/HPointLoc/',
@@ -296,3 +330,45 @@ def get_dist(query_img, database_img, path_to_hdf_files):
     db_pose, _, _, _ = get_pose(database_img, path_to_hdf_files)
     dist_diff, _ = poses_diff(query_pose, db_pose)
     return dist_diff
+
+
+def getrgb(name, path_to_hdf='./datasets/Habitat/HPointLoc/'):
+    maps = os.listdir(path_to_hdf)
+    map_name = name.split('_')[0]
+    for cur_map in maps:
+        if map_name in cur_map:
+            map_name = cur_map
+    hdf5_filename = '_'.join(name.split('_')[:2]) + '.hdf5'
+    hdf5_file = h5py.File(os.path.join(os.path.join(path_to_hdf, map_name), hdf5_filename), 'r')
+    num = int(name.split('_')[-1])
+    is_db = is_database(name)
+    rgb = hdf5_file['rgb'+is_db][num]
+    return rgb
+
+
+def visual(case_log):
+    def a(num):
+        return int(num*100) / 100
+    
+    def proc_nums(d):
+        return f"hfnet: {a(d['hfnetsim'])}, sem: {a(d['semsim'])}, dist: {a(d['dist'])}"
+    
+    plt.figure(figsize=(10,7))
+    plt.title('query_image')
+    plt.imshow(getrgb(case_log['query_name']))
+    
+    plt.figure(figsize=(17,10))
+    for i, sample in enumerate(case_log['top_hfnet'][:4]):
+        plt.subplot(3, 4, 1 + i)
+        plt.imshow(getrgb(sample['db_filename']))
+        plt.title(proc_nums(sample))
+        
+    for i, sample in enumerate(case_log['top_sem'][:4]):
+        plt.subplot(3, 4, 5 + i)
+        plt.imshow(getrgb(sample['db_filename']))
+        plt.title(proc_nums(sample))
+        
+    for i, sample in enumerate(case_log['top_dist'][:4]):
+        plt.subplot(3, 4, 9 + i)
+        plt.imshow(getrgb(sample['db_filename']))
+        plt.title(proc_nums(sample))

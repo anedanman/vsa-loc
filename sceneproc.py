@@ -37,10 +37,10 @@ def center_of_mass(mask):
                 c += 1
                 x_counter += j
                 y_counter += i
-    return (x_counter / c, y_counter / c)
+    return (int(x_counter / c), int(y_counter / c))
 
 
-def scene_repr(sem_img, mapp, ind2title, skip_wall=True, no_coords=True):
+def scene_repr(sem_img, mapp, ind2title, skip_wall=True, no_coords=True, depth_img=None):
     elements_in_image = []
     
     for string in sem_img:
@@ -56,7 +56,9 @@ def scene_repr(sem_img, mapp, ind2title, skip_wall=True, no_coords=True):
         cur_el['type'] = typ
         cur_mask = (sem_img == el) * 1
         if not no_coords:
-            cur_el['center_of_mass'] = center_of_mass(cur_mask)
+            cm = center_of_mass(cur_mask)
+            cur_el['center_of_mass'] = cm
+            cur_el['depth'] = depth_img[cm[1]][cm[0]]
         result.append(cur_el)
     return result
 
@@ -89,7 +91,7 @@ def get_pairs(sem_img, scene_objs):
             if el2 is None:
                 continue
             if el2['name'] not in seen_names and el1['type'] != el2['type']:
-                pair = (el1['type'], el2['type'])
+                pair = (el1, el2)
                 pairs.append(pair)
                 used_names.add(el1['name'])
                 used_names.add(el2['name'])
@@ -111,6 +113,7 @@ def create_im(objs):
     item_memory = {}
     item_memory['X'] = vsa.make_unitary(vsa.generate())
     item_memory['Y'] = vsa.make_unitary(vsa.generate())
+    item_memory['D'] = vsa.make_unitary(vsa.generate())
     item_memory['R'] = vsa.generate()
     for obj in objs:
         item_memory[obj] = vsa.generate()
@@ -128,6 +131,13 @@ def process_coordinates(center_of_mass, item_memory):
     return res
 
 
+def process_depth(depth, item_memory):
+    d = depth 
+    D_hd = item_memory['D']
+    D = vsa.power(D_hd, d)
+    return D
+
+
 def get_scene_vec(scene, item_memory, use_coord=True):
     cur_vec = np.zeros(len(vsa.generate()))
     for obj in scene:
@@ -143,15 +153,39 @@ def edges_scene_vec(item_memory, pairs, other_scene, use_R=True):
     cur_vec = np.zeros(len(vsa.generate()))
     for o1, o2 in pairs:
         if use_R:
-            vec1 = vsa.bind(item_memory[o1], item_memory['R'])
-            vec2 = vsa.bind(vec1, item_memory[o2])
+            vec1 = vsa.bind(item_memory[o1['type']], item_memory['R'])
+            vec2 = vsa.bind(vec1, item_memory[o2['type']])
             cur_vec = vsa.bundle(cur_vec, vec2)
         else:
-            vec = vsa.bind(item_memory[o1], item_memory[o2])
+            vec = vsa.bind(item_memory[o1['type']], item_memory[o2['type']])
             cur_vec = vsa.bundle(cur_vec, vec)
     
     for obj in other_scene:
         obj_vec = item_memory[obj['type']]
+        cur_vec = vsa.bundle(cur_vec, obj_vec) 
+    return cur_vec
+
+
+def depth_edges_scene_vec(item_memory, pairs, other_scene, use_R=True):
+    cur_vec = np.zeros(len(vsa.generate()))
+    for o1, o2 in pairs:
+        if use_R:
+            depth_vec1 = process_depth(o1['depth'], item_memory)
+            vec1 = vsa.bind(item_memory[o1['type']], depth_vec1)
+            vec1 = vsa.bind(vec1, item_memory['R'])
+            depth_vec2 = process_depth(o2['depth'], item_memory)
+            vec2 = vsa.bind(item_memory[o2['type']], depth_vec2)
+            vec2 = vsa.bind(vec1, vec2)
+            cur_vec = vsa.bundle(cur_vec, vec2)
+        else:
+            vec = vsa.bind(item_memory[o1['type']], item_memory[o2['type']])
+            cur_vec = vsa.bundle(cur_vec, vec)
+    
+    for obj in other_scene:
+        obj_vec = item_memory[obj['type']]
+        if 'depth' in obj:
+            depth_vec = process_depth(obj['depth'], item_memory)
+            obj_vec = vsa.bind(obj_vec, depth_vec)
         cur_vec = vsa.bundle(cur_vec, obj_vec) 
     return cur_vec
 
@@ -166,4 +200,11 @@ def sem2edgevec(semantic_image, mapping, index_to_title_map, im, use_R=True, ski
     scene = scene_repr(semantic_image, mapping, index_to_title_map, skip_wall)
     pairs, other_scene = get_pairs(semantic_image, scene)
     vec = edges_scene_vec(im, pairs, other_scene, use_R)
+    return vec
+
+
+def sem2depthvec(semantic_image, depth_img, mapping, index_to_title_map, im, use_R=True, skip_wall=False):
+    scene = scene_repr(semantic_image, mapping, index_to_title_map, skip_wall, no_coords=False, depth_img=depth_img)
+    pairs, other_scene = get_pairs(semantic_image, scene)
+    vec = depth_edges_scene_vec(im, pairs, other_scene, use_R)
     return vec
