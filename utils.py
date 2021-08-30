@@ -10,6 +10,7 @@ import ast
 from sceneproc import create_im, sem2vec, sem2edgevec, sem2depthvec
 import json
 import matplotlib.pyplot as plt
+import ray
 
 
 def quaternion_to_rotation_matrix(quaternion_wxyz):
@@ -73,7 +74,7 @@ def proccess_descr(path_to_global_descriptors, query_image, database, sem_path, 
 
 
 def proccess_descr_adv(path_to_hdf_files, path_to_global_descriptors,
-                       query_image, database, sem_path, k=0.5, n=5, hfnthr=0.1, semthr=0.1):
+                       query_image, database, sem_path, k=0.5, n=5, hfnthr=0.1, semthr=0.1, res_name=''):
     with open(os.path.join(path_to_global_descriptors, query_image+'.npy'), 'rb') as f:
             descriptor_query = np.load(f)
     with open(os.path.join(sem_path, query_image+'.npy'), 'rb') as f:
@@ -101,9 +102,9 @@ def proccess_descr_adv(path_to_hdf_files, path_to_global_descriptors,
         'semsim': sim2,
         'dist': dist} for db_image, sim1, sim2, dist in zip(db_names, hfnetsims, semsims, dists)]
 
-    if not os.path.exists(os.path.join(path_to_global_descriptors, 'res')):
-        os.mkdir(os.path.join(path_to_global_descriptors, 'res'))
-    with open(os.path.join(path_to_global_descriptors, 'res', query_image+'.json'), 'w') as f:
+    if not os.path.exists(os.path.join(path_to_global_descriptors, 'res_' + res_name)):
+        os.mkdir(os.path.join(path_to_global_descriptors, 'res_' + res_name))
+    with open(os.path.join(path_to_global_descriptors, 'res_' + res_name, query_image+'.json'), 'w') as f:
         json.dump(result, f)
 
     tophfnet = sorted(result, key=lambda x: -x['hfnetsim'])
@@ -123,7 +124,7 @@ def proccess_descr_adv(path_to_hdf_files, path_to_global_descriptors,
 def adv_test(path_to_hdf='./datasets/Habitat/HPointLoc/',
               path_to_hfnet='./vectors/HF-Net_descriptors',
               path_to_sem='./vectors/semantic_edges',
-              k=0.9, dist_thr=20, hfnthr=0.1, semthr=0.1, n=5, use_saved=True):
+              k=0.9, dist_thr=20, hfnthr=0.1, semthr=0.1, n=5, use_saved=True, res_name=''):
     results = []
     deltas = []
     problem_cases = []
@@ -141,17 +142,17 @@ def adv_test(path_to_hdf='./datasets/Habitat/HPointLoc/',
                 
         distances = [0.25, 0.5, 1, 5, 10, 20]
         res = {i:0 for i in distances}
-        for query in queries:
+        for query in tqdm(queries):
             if not use_saved:
                 delta, db_image, tophfnet, topdist, topsem = proccess_descr_adv(os.path.join(path_to_hdf, map_name),
                                                                                 os.path.join(path_to_hfnet, map_name),
                                                                                 query, database,
                                                                                 os.path.join(path_to_sem, map_name),
-                                                                                k=k, n=n, semthr=semthr, hfnthr=hfnthr)
+                                                                                k=k, n=n, semthr=semthr, hfnthr=hfnthr, res_name=res_name)
                 dist_diff = get_dist(query, db_image, os.path.join(path_to_hdf, map_name))
                 deltas.append(delta)
             else:
-                with open(os.path.join(os.path.join(path_to_hfnet, map_name), 'res', query + '.json'), 'r') as f:
+                with open(os.path.join(os.path.join(path_to_hfnet, map_name), 'res_' + res_name, query + '.json'), 'r') as f:
                     result = json.load(f)
                 tophfnet = sorted(result, key=lambda x: -x['hfnetsim'])
                 topdist = sorted(result, key=lambda x: x['dist'])
@@ -204,7 +205,7 @@ def get_pose(filename, path_to_hdf5_datasets):
     index_to_title_map_query = ast.literal_eval(str(np.array(hdf5_file_query1['index_to_title_map'])))
     mapping_query = np.array(hdf5_file_query1['mapping'])
         
-    return depth, semantic, index_to_title_map_query, mapping_query
+    return depth, semantic, index_to_title_map_query, mapping_query, pose_44_query1
 
 
 def poses_diff(pose1, pose2):
@@ -220,7 +221,7 @@ def poses_diff(pose1, pose2):
 def save_vectrs(descrs_path, sem_path, path_to_hdf5_datasets):
     im = None
     for name in tqdm(os.listdir(descrs_path)):
-        _, db_sem, index_to_title_map, mapping = get_pose(name, path_to_hdf5_datasets)
+        _, db_sem, index_to_title_map, mapping, _ = get_pose(name, path_to_hdf5_datasets)
         if im is None:
             im = create_im(index_to_title_map.values())
             
@@ -232,7 +233,7 @@ def save_vectrs(descrs_path, sem_path, path_to_hdf5_datasets):
 def save_edge_vectrs(descrs_path, sem_path, path_to_hdf5_datasets, use_R=True, skip_wall=True):
     im = None
     for name in tqdm(os.listdir(descrs_path)):
-        _, db_sem, index_to_title_map, mapping = get_pose(name, path_to_hdf5_datasets)
+        _, db_sem, index_to_title_map, mapping, _ = get_pose(name, path_to_hdf5_datasets)
         if im is None:
             im = create_im(index_to_title_map.values())
             
@@ -244,7 +245,7 @@ def save_edge_vectrs(descrs_path, sem_path, path_to_hdf5_datasets, use_R=True, s
 def save_depth_vectrs(descrs_path, sem_path, path_to_hdf5_datasets):
     im = None
     for name in tqdm(os.listdir(descrs_path)):
-        depth_im, db_sem, index_to_title_map, mapping = get_pose(name, path_to_hdf5_datasets)
+        depth_im, db_sem, index_to_title_map, mapping, _ = get_pose(name, path_to_hdf5_datasets)
         if im is None:
             im = create_im(index_to_title_map.values())
             
@@ -253,6 +254,24 @@ def save_depth_vectrs(descrs_path, sem_path, path_to_hdf5_datasets):
             os.mkdir(sem_path)
         with open(os.path.join(sem_path, name), 'wb') as f:
             np.save(f, db_vec)
+
+
+@ray.remote
+def save_one_depth(sem_path, path_to_hdf5_datasets, name, im):
+    depth_im, db_sem, index_to_title_map, mapping, _ = get_pose(name, path_to_hdf5_datasets)
+    db_vec = sem2depthvec(db_sem, depth_im, mapping, index_to_title_map, im)
+    if not os.path.exists(sem_path):
+        os.mkdir(sem_path)
+    with open(os.path.join(sem_path, name), 'wb') as f:
+        np.save(f, db_vec)
+
+
+def save_depth_vectrs_fast(descrs_path, sem_path, path_to_hdf5_datasets):
+    name0 = os.listdir(descrs_path)[0]
+    depth_im, db_sem, index_to_title_map, mapping, _ = get_pose(name0, path_to_hdf5_datasets)
+    im = create_im(index_to_title_map.values())
+    futures = [save_one_depth.remote(sem_path, path_to_hdf5_datasets, name, im) for name in os.listdir(descrs_path) if not 'res' in name]
+    ray.get(futures)
             
             
 def gl_save_vectrs(descrs_path='./vectors/HF-Net_descriptors',
@@ -282,6 +301,18 @@ def gl_save_depth_vectrs(descrs_path='./vectors/HF-Net_descriptors',
         os.mkdir(sem_path)
     for map_name in os.listdir(descrs_path):
         save_depth_vectrs(os.path.join(descrs_path, map_name), 
+                    os.path.join(sem_path, map_name),
+                    os.path.join(path_to_hdf5_datasets, map_name))
+
+
+def gl_save_depth_vectrs_fast(descrs_path='./vectors/HF-Net_descriptors',
+                        sem_path='./vectors/semantic_depths',
+                        path_to_hdf5_datasets='./datasets/Habitat/HPointLoc/'):
+    ray.init()
+    if not os.path.exists(sem_path):
+        os.mkdir(sem_path)
+    for map_name in tqdm(os.listdir(descrs_path)):
+        save_depth_vectrs_fast(os.path.join(descrs_path, map_name), 
                     os.path.join(sem_path, map_name),
                     os.path.join(path_to_hdf5_datasets, map_name))
 
@@ -326,8 +357,8 @@ def main_test(path_to_hdf='./datasets/Habitat/HPointLoc/',
     
 
 def get_dist(query_img, database_img, path_to_hdf_files):
-    query_pose, _, _, _ = get_pose(query_img, path_to_hdf_files)
-    db_pose, _, _, _ = get_pose(database_img, path_to_hdf_files)
+    _, _, _, _, query_pose = get_pose(query_img, path_to_hdf_files)
+    _, _, _, _, db_pose = get_pose(database_img, path_to_hdf_files)
     dist_diff, _ = poses_diff(query_pose, db_pose)
     return dist_diff
 
